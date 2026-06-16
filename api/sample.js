@@ -1,4 +1,4 @@
-const Jimp = require("jimp");
+const sharp = require("sharp");
 
 module.exports = async (req, res) => {
   if (req.method !== "POST") {
@@ -20,24 +20,40 @@ module.exports = async (req, res) => {
     if (!imgResp.ok) {
       throw new Error("Could not download image, HTTP " + imgResp.status);
     }
-    const arrayBuf = await imgResp.arrayBuffer();
-    const buffer = Buffer.from(arrayBuf);
+    const buffer = Buffer.from(await imgResp.arrayBuffer());
 
-    const image = await Jimp.read(buffer);
+    const base = sharp(buffer).ensureAlpha();
 
-    // Small preview so the overlay can show what the image actually looks like
-    const previewImg = image.clone().resize(128, 128, Jimp.RESIZE_BICUBIC);
-    const previewDataUrl = await previewImg.getBase64Async(Jimp.MIME_PNG);
-    const previewBase64 = previewDataUrl.split(",")[1];
+    // Lanczos3 (sharp's default kernel) gives noticeably crisper results than
+    // bilinear/bicubic, especially when shrinking an image down a lot.
+    const previewBuf = await base
+      .clone()
+      .resize(128, 128, { fit: "fill", kernel: "lanczos3" })
+      .sharpen()
+      .png()
+      .toBuffer();
+    const previewBase64 = previewBuf.toString("base64");
 
-    // Downsample to the requested grid and read every cell's color
-    const sampled = image.clone().resize(gridSize, gridSize, Jimp.RESIZE_BICUBIC);
+    const { data, info } = await base
+      .clone()
+      .resize(gridSize, gridSize, { fit: "fill", kernel: "lanczos3" })
+      .sharpen()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
 
+    const channels = info.channels;
     const pixels = [];
     for (let row = 0; row < gridSize; row++) {
       for (let col = 0; col < gridSize; col++) {
-        const rgba = Jimp.intToRGBA(sampled.getPixelColor(col, row));
-        pixels.push({ row, col, r: rgba.r, g: rgba.g, b: rgba.b, a: rgba.a });
+        const idx = (row * gridSize + col) * channels;
+        pixels.push({
+          row: row,
+          col: col,
+          r: data[idx],
+          g: data[idx + 1],
+          b: data[idx + 2],
+          a: channels >= 4 ? data[idx + 3] : 255
+        });
       }
     }
 

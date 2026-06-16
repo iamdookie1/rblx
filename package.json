@@ -3,6 +3,6 @@
   "version": "1.0.0",
   "private": true,
   "dependencies": {
-    "jimp": "0.22.12"
+    "sharp": "0.33.4"
   }
 }

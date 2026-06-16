@@ -1,9 +1,56 @@
 const sharp = require("sharp");
 
+function premultiply(rawBuf, channels) {
+  if (channels < 4) return rawBuf;
+  const out = Buffer.from(rawBuf);
+  for (let i = 0; i < out.length; i += channels) {
+    const a = out[i + 3] / 255;
+    out[i]     = Math.round(out[i]     * a);
+    out[i + 1] = Math.round(out[i + 1] * a);
+    out[i + 2] = Math.round(out[i + 2] * a);
+  }
+  return out;
+}
+
+function unpremultiply(rawBuf, channels) {
+  if (channels < 4) return rawBuf;
+  const out = Buffer.from(rawBuf);
+  for (let i = 0; i < out.length; i += channels) {
+    const a = out[i + 3];
+    if (a === 0) continue;
+    const f = 255 / a;
+    out[i]     = Math.min(255, Math.round(out[i]     * f));
+    out[i + 1] = Math.min(255, Math.round(out[i + 1] * f));
+    out[i + 2] = Math.min(255, Math.round(out[i + 2] * f));
+  }
+  return out;
+}
+
+// sharp doesn't premultiply alpha before blending pixels during resize, which
+// means color from opaque areas bleeds into nearby transparent pixels' RGB
+// (invisible normally, but it corrupts both our white-background detection
+// and the final painted colors). Premultiplying first and undoing it after
+// fixes that.
+async function alphaSafeResize(sharpImg, width, height, resizeOpts) {
+  const { data, info } = await sharpImg.raw().toBuffer({ resolveWithObject: true });
+  const pre = premultiply(data, info.channels);
+  const resizedRaw = await sharp(pre, {
+    raw: { width: info.width, height: info.height, channels: info.channels }
+  })
+    .resize(width, height, resizeOpts)
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const post = unpremultiply(resizedRaw.data, resizedRaw.info.channels);
+  return sharp(post, {
+    raw: { width: resizedRaw.info.width, height: resizedRaw.info.height, channels: resizedRaw.info.channels }
+  });
+}
+
 function maskOutBackground(raw, info, bg, tolerance) {
   const { channels } = info;
   const out = Buffer.from(raw);
   for (let i = 0; i < out.length; i += channels) {
+    if (out[i + 3] < 5) continue; // already transparent, nothing to do
     const dr = out[i] - bg.r;
     const dg = out[i + 1] - bg.g;
     const db = out[i + 2] - bg.b;
@@ -43,16 +90,13 @@ module.exports = async (req, res) => {
     const aspectRatio = meta.width / meta.height;
 
     if (removeBackground) {
-      const { data, info } = await base
-        .clone()
-        .resize(500, 500, { fit: "inside", withoutEnlargement: true })
-        .raw()
-        .toBuffer({ resolveWithObject: true });
-
-      const masked = maskOutBackground(data, info, { r: 255, g: 255, b: 255 }, tolerance);
-      base = sharp(masked, {
-        raw: { width: info.width, height: info.height, channels: info.channels }
+      const working = await alphaSafeResize(base.clone(), 500, 500, {
+        fit: "inside",
+        withoutEnlargement: true
       });
+      const { data, info } = await working.raw().toBuffer({ resolveWithObject: true });
+      const masked = maskOutBackground(data, info, { r: 255, g: 255, b: 255 }, tolerance);
+      base = sharp(masked, { raw: { width: info.width, height: info.height, channels: info.channels } });
     }
 
     let gridCols = gridSize;
@@ -68,21 +112,27 @@ module.exports = async (req, res) => {
     }
 
     const previewMax = 160;
-    let previewPipeline = base.clone();
+    let previewW = previewMax, previewH = previewMax;
     if (matchAspect) {
-      previewPipeline = previewPipeline.resize(previewMax, previewMax, { fit: "inside", kernel: "lanczos3" });
-    } else {
-      previewPipeline = previewPipeline.resize(previewMax, previewMax, { fit: "fill", kernel: "lanczos3" });
+      if (aspectRatio >= 1) {
+        previewH = Math.max(1, Math.round(previewMax / aspectRatio));
+      } else {
+        previewW = Math.max(1, Math.round(previewMax * aspectRatio));
+      }
     }
-    const previewBuf = await previewPipeline.sharpen().png().toBuffer();
+
+    const previewSharp = await alphaSafeResize(base.clone(), previewW, previewH, {
+      fit: "fill",
+      kernel: "lanczos3"
+    });
+    const previewBuf = await previewSharp.sharpen().png().toBuffer();
     const previewBase64 = previewBuf.toString("base64");
 
-    const { data, info } = await base
-      .clone()
-      .resize(gridCols, gridRows, { fit: "fill", kernel: "lanczos3" })
-      .sharpen()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
+    const gridSharp = await alphaSafeResize(base.clone(), gridCols, gridRows, {
+      fit: "fill",
+      kernel: "lanczos3"
+    });
+    const { data, info } = await gridSharp.sharpen().raw().toBuffer({ resolveWithObject: true });
 
     const channels = info.channels;
     const pixels = [];

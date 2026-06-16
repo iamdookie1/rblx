@@ -26,12 +26,12 @@ module.exports = async (req, res) => {
     const image = await Jimp.read(buffer);
 
     // Small preview so the overlay can show what the image actually looks like
-    const previewImg = image.clone().resize(128, 128, Jimp.RESIZE_BILINEAR);
+    const previewImg = image.clone().resize(128, 128, Jimp.RESIZE_BICUBIC);
     const previewDataUrl = await previewImg.getBase64Async(Jimp.MIME_PNG);
     const previewBase64 = previewDataUrl.split(",")[1];
 
     // Downsample to the requested grid and read every cell's color
-    const sampled = image.clone().resize(gridSize, gridSize, Jimp.RESIZE_BILINEAR);
+    const sampled = image.clone().resize(gridSize, gridSize, Jimp.RESIZE_BICUBIC);
 
     const pixels = [];
     for (let row = 0; row < gridSize; row++) {
